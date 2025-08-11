@@ -9,36 +9,52 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-south-1
 
-      - name: Deploy Static Website to S3
-        run: |
-          set -e
-          echo "Deploying new version..."
-          aws s3 sync . s3://zintora-soft-project --delete
-        continue-on-error: true
-        id: deploy_step
+    # Backup current live version (to rollback later if needed)
+    - name: Backup Current Website
+      run: |
+        mkdir backup
+        aws s3 sync s3://zintora-soft-project ./backup
+        aws s3 sync ./backup s3://zintora-soft-project-backup
 
-      - name: Rollback if deploy failed
-        if: steps.deploy_step.outcome == 'failure'
-        run: |
-          echo "Deployment failed! Rolling back..."
-          # Get list of all objects and their previous versions
-          aws s3api list-object-versions --bucket zintora-soft-project --query "Versions[?IsLatest==\`false\`]" > old_versions.json
+    # Deploy new version
+    - name: Deploy Static Website to S3
+      run: |
+        set -e
+        aws s3 sync . s3://zintora-soft-project --delete
 
-          # Restore each file to its previous version
-          cat old_versions.json | jq -c '.[]' | while read i; do
-            KEY=$(echo $i | jq -r '.Key')
-            VERSION=$(echo $i | jq -r '.VersionId')
-            aws s3api copy-object --bucket zintora-soft-project --copy-source zintora-soft-project/$KEY?versionId=$VERSION --key "$KEY"
-          done
+    # Download logs from S3 logging bucket
+    - name: Download S3 Access Logs
+      run: |
+        mkdir s3-logs
+        aws s3 sync s3://zintora-soft-logs/access-logs ./s3-logs --exact-timestamps
 
-          echo "Rollback complete."
+    - name: Upload Logs as Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: s3-access-logs
+        path: s3-logs
+
+    # Rollback if deployment fails
+    - name: Rollback on Failure
+      if: failure()
+      run: |
+        echo "Deployment failed! Rolling back..."
+        aws s3 sync s3://zintora-soft-project-backup s3://zintora-soft-project --delete
+
+    # (Optional) Send SNS Notification on Failure
+    - name: Send Failure Notification
+      if: failure()
+      run: |
+        aws sns publish \
+          --topic-arn arn:aws:sns:ap-south-1:123456789012:s3-deploy-alerts \
+          --message "Deployment failed and rollback executed for Portfolio website."
