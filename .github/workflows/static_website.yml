@@ -19,14 +19,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ap-south-1
 
-    # Backup current live version (to rollback later if needed)
-    - name: Backup Current Website
-      run: |
-        mkdir backup
-        aws s3 sync s3://zintora-soft-project ./backup
-        aws s3 sync ./backup s3://zintora-soft-project-backup
-
-    # Deploy new version
+    # Deploy new version (versioning enabled)
     - name: Deploy Static Website to S3
       run: |
         set -e
@@ -36,7 +29,7 @@ jobs:
     - name: Download S3 Access Logs
       run: |
         mkdir s3-logs
-        aws s3 sync s3://zintora-soft-logs/access-logs ./s3-logs --exact-timestamps
+        aws s3 sync s3://zintora-soft-logs ./s3-logs --exact-timestamps
 
     - name: Upload Logs as Artifact
       uses: actions/upload-artifact@v4
@@ -44,17 +37,17 @@ jobs:
         name: s3-access-logs
         path: s3-logs
 
-    # Rollback if deployment fails
+    # Rollback if deployment fails using S3 versioning
     - name: Rollback on Failure
       if: failure()
       run: |
-        echo "Deployment failed! Rolling back..."
-        aws s3 sync s3://zintora-soft-project-backup s3://zintora-soft-project --delete
-
-    # (Optional) Send SNS Notification on Failure
-    - name: Send Failure Notification
-      if: failure()
-      run: |
-        aws sns publish \
-          --topic-arn arn:aws:sns:ap-south-1:123456789012:s3-deploy-alerts \
-          --message "Deployment failed and rollback executed for Portfolio website."
+        echo "Deployment failed! Rolling back using S3 versioning..."
+        # Get list of object versions before deployment
+        aws s3api list-object-versions --bucket zintora-soft-project --output text > version-list.txt
+        # For each object, restore the previous version
+        awk '/VERSIONS/ {print $3, $4}' version-list.txt | while read key version; do
+          aws s3api copy-object \
+            --bucket zintora-soft-project \
+            --key "$key" \
+            --copy-source zintora-soft-project/"$key"?versionId="$version"
+        done
