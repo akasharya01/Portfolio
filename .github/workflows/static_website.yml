@@ -1,23 +1,44 @@
-name: Portfolio Deployment 
+name: Portfolio Deployment
 
-on: 
-  push: 
-    branches: 
-    - main
+on:
+  push:
+    branches:
+      - main
 
-jobs: 
-  deploy: 
+jobs:
+  deploy:
     runs-on: ubuntu-latest
-    steps: 
-    - name: Checkout
-      uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with: 
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}   
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ap-south-1
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
 
-    - name: Deploy Static website to S3 bucket
-      run: aws s3 sync . s3://zintora-soft-project --delete
+      - name: Deploy Static Website to S3
+        run: |
+          set -e
+          echo "Deploying new version..."
+          aws s3 sync . s3://zintora-soft-project --delete
+        continue-on-error: true
+        id: deploy_step
+
+      - name: Rollback if deploy failed
+        if: steps.deploy_step.outcome == 'failure'
+        run: |
+          echo "Deployment failed! Rolling back..."
+          # Get list of all objects and their previous versions
+          aws s3api list-object-versions --bucket zintora-soft-project --query "Versions[?IsLatest==\`false\`]" > old_versions.json
+
+          # Restore each file to its previous version
+          cat old_versions.json | jq -c '.[]' | while read i; do
+            KEY=$(echo $i | jq -r '.Key')
+            VERSION=$(echo $i | jq -r '.VersionId')
+            aws s3api copy-object --bucket zintora-soft-project --copy-source zintora-soft-project/$KEY?versionId=$VERSION --key "$KEY"
+          done
+
+          echo "Rollback complete."
